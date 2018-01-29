@@ -20,7 +20,13 @@ use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 
 fn main() {
-    main_impl().unwrap();
+    while let Err(e) = main_impl() {
+        eprint!("(EE) {}", e);
+        for err in e.causes().skip(1) {
+            eprint!(": {}", err);
+        }
+        eprintln!();
+    }
 }
 
 fn main_impl() -> irc::error::Result<()> {
@@ -215,7 +221,6 @@ impl Sink for Splitter {
     type SinkError = IrcError;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        let mut res = Ok(AsyncSink::Ready);
         if self.buffer.is_ready() == false {
             match item.command {
                 Command::Response(Response::RPL_ENDOFMOTD, _, _) |
@@ -224,17 +229,18 @@ impl Sink for Splitter {
             }
             self.buffer.push(item.clone());
         }
-        for mut sender in self.senders.lock().expect("unreachable").iter() {
-            res = res.and(sender.start_send(item.clone()));
-        }
-        res.map_err(IrcError::AsyncChannelClosed)
+        let mut senders = self.senders.lock().expect("unreachable");
+        *senders = senders.clone().into_iter().filter_map(|mut sender| {
+            sender.start_send(item.clone()).ok().map(|_| sender)
+        }).collect();
+        Ok(AsyncSink::Ready)
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        let mut res = Ok(Async::Ready(()));
-        for mut sender in self.senders.lock().expect("unreachable").iter() {
-            res = res.and(sender.poll_complete());
-        }
-        res.map_err(IrcError::AsyncChannelClosed)
+        let mut senders = self.senders.lock().expect("unreachable");
+        *senders = senders.clone().into_iter().filter_map(|mut sender| {
+            sender.poll_complete().ok().map(|_| sender)
+        }).collect();
+        Ok(Async::Ready(()))
     }
 }
