@@ -28,9 +28,9 @@ fn main() {
         let report = e.causes().skip(1).fold(format!("{}", e), |acc, err| {
             format!("{}: {}", acc, err)
         });
-        error!("{}", report);
+        error!("BNC: {}", report);
         if let Some(backtrace) = e.backtrace() {
-            debug!("{}", backtrace);
+            info!("{}", backtrace);
         }
     }
 }
@@ -51,7 +51,8 @@ fn main_impl() -> irc::error::Result<()> {
     let PackedIrcClient(client, client_send_future) = reactor.run(IrcClient::new_future(
         client_handle, &config
     )?)?;
-    info!(
+    info!("BNC: Connected to {}:{}.", client.config().server()?, client.config().port());
+    debug!(
         "HOST: {}:{} resolved to {}", client.config().server()?, client.config().port(),
         client.config().socket_addr()?
     );
@@ -62,7 +63,7 @@ fn main_impl() -> irc::error::Result<()> {
     let hostname = LatestHostname::new();
     let split_to_nowhere = splitter.split().map(|message| {
         let local_client = client.clone();
-        info!("FROM {}: {}", saddr, message.to_string().trimmed());
+        debug!("FROM {}: {}", saddr, message.to_string().trimmed());
         if message.source_nickname().unwrap_or("") == local_client.current_nickname() {
             hostname.clone().update_hostname(message.prefix.clone());
         }
@@ -81,9 +82,9 @@ fn main_impl() -> irc::error::Result<()> {
 
     // Joining the two together.
     let bouncer = bouncer_connections.map_err(IrcError::Io).for_each(|(writer, reader, baddr)| {
-        debug!("client connected: {}", baddr);
+        info!("BNC: Client connected from {}.", baddr);
         let client_stream = splitter.split();
-        trace!("finished replaying to {}", baddr);
+        trace!("REPLAY: Finished replaying to {}", baddr);
         let local_client = client.clone();
         let saddr = local_client.config().socket_addr()?;
 
@@ -104,7 +105,7 @@ fn main_impl() -> irc::error::Result<()> {
 
         let to_bouncer_client = writer.send_all(client_stream.select(rx_bouncer_client).map(
             move |message| {
-                info!("TO {}: {}", &baddr, message.to_string().trimmed());
+                debug!("TO {}: {}", &baddr, message.to_string().trimmed());
                 message
             }
         ).map_err::<IrcError, _>(|()| unreachable!()));
@@ -112,7 +113,7 @@ fn main_impl() -> irc::error::Result<()> {
         let filter_client = local_client.clone();
         let filter_hostname = hostname.clone();
         let to_real_client = reader.filter(move |message| {
-            info!("FROM {}: {}", &baddr, message.to_string().trimmed());
+            debug!("FROM {}: {}", &baddr, message.to_string().trimmed());
             match message.command {
                 // Complex (action-taking) filters
                 Command::JOIN(ref chan, _, _) if filter_client.list_channels().map(|chans| {
@@ -132,17 +133,21 @@ fn main_impl() -> irc::error::Result<()> {
                     trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
                     false
                 },
+                Command::QUIT(_) => {
+                    trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
+                    info!("BNC: Client from {} disconnected.", &baddr);
+                    false
+                },
                 Command::NICK(_) |
                 Command::USER(_, _, _) |
-                Command::CAP(_, _, _, _) |
-                Command::QUIT(_) => {
+                Command::CAP(_, _, _, _) => {
                     trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
                     false
                 },
                 _ => true,
             }
         }).for_each(move |message| {
-            info!("TO {}: {}", &saddr, message.to_string().trimmed());
+            debug!("TO {}: {}", &saddr, message.to_string().trimmed());
             local_client.send(message)
         });
         let baddr = baddr.clone();
@@ -152,7 +157,7 @@ fn main_impl() -> irc::error::Result<()> {
             });
             error!("{}", report);
             if let Some(backtrace) = e.backtrace() {
-                debug!("{}", backtrace);
+                info!("{}", backtrace);
             }
         }));
         Ok(())
@@ -189,8 +194,11 @@ impl LatestHostname {
     }
 
     pub fn update_hostname(&self, hostname: Option<String>) {
-        debug!("HOST: updating hostname to {:?}", hostname);
-        *self.0.lock().expect("unreachable") = hostname
+        match hostname {
+            Some(ref host) => trace!("HOST: Updating hostname to {:?}.", host),
+            None => trace!("HOST: Resetting hostname.")
+        };
+        *self.0.lock().expect("unreachable") = hostname;
     }
 
     pub fn hostname(&self) -> Option<String> {
