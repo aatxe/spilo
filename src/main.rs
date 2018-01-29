@@ -1,5 +1,8 @@
+extern crate env_logger;
 extern crate failure;
 extern crate futures;
+#[macro_use]
+extern crate log;
 extern crate irc;
 extern crate tokio_core;
 extern crate tokio_io;
@@ -20,12 +23,15 @@ use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 
 fn main() {
+    env_logger::init();
     while let Err(e) = main_impl() {
-        eprint!("(EE) {}", e);
-        for err in e.causes().skip(1) {
-            eprint!(": {}", err);
+        let report = e.causes().skip(1).fold(format!("{}", e), |acc, err| {
+            format!("{}: {}", acc, err)
+        });
+        error!("{}", report);
+        if let Some(backtrace) = e.backtrace() {
+            debug!("{}", backtrace);
         }
-        eprintln!();
     }
 }
 
@@ -45,6 +51,10 @@ fn main_impl() -> irc::error::Result<()> {
     let PackedIrcClient(client, client_send_future) = reactor.run(IrcClient::new_future(
         client_handle, &config
     )?)?;
+    info!(
+        "HOST: {}:{} resolved to {}", client.config().server()?, client.config().port(),
+        client.config().socket_addr()?
+    );
     client.identify()?;
     let splitter = Splitter::new();
     let client_splitter_future = client.stream().forward(splitter.clone());
@@ -52,7 +62,7 @@ fn main_impl() -> irc::error::Result<()> {
     let hostname = LatestHostname::new();
     let split_to_nowhere = splitter.split().map(|message| {
         let local_client = client.clone();
-        print!("[R {}] {}", saddr, message);
+        info!("FROM {}: {}", saddr, message.to_string().trimmed());
         if message.source_nickname().unwrap_or("") == local_client.current_nickname() {
             hostname.clone().update_hostname(message.prefix.clone());
         }
@@ -71,7 +81,9 @@ fn main_impl() -> irc::error::Result<()> {
 
     // Joining the two together.
     let bouncer = bouncer_connections.map_err(IrcError::Io).for_each(|(writer, reader, baddr)| {
+        debug!("client connected: {}", baddr);
         let client_stream = splitter.split();
+        trace!("finished replaying to {}", baddr);
         let local_client = client.clone();
         let saddr = local_client.config().socket_addr()?;
 
@@ -92,7 +104,7 @@ fn main_impl() -> irc::error::Result<()> {
 
         let to_bouncer_client = writer.send_all(client_stream.select(rx_bouncer_client).map(
             move |message| {
-                print!("[S {}] {}", &baddr, message);
+                info!("TO {}: {}", &baddr, message.to_string().trimmed());
                 message
             }
         ).map_err::<IrcError, _>(|()| unreachable!()));
@@ -100,12 +112,13 @@ fn main_impl() -> irc::error::Result<()> {
         let filter_client = local_client.clone();
         let filter_hostname = hostname.clone();
         let to_real_client = reader.filter(move |message| {
-            print!("[R {}] {}", &baddr, message);
+            info!("FROM {}: {}", &baddr, message.to_string().trimmed());
             match message.command {
                 // Complex (action-taking) filters
                 Command::JOIN(ref chan, _, _) if filter_client.list_channels().map(|chans| {
                     chans.contains(chan)
                 }).unwrap_or(false) => {
+                    trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
                     tx_bouncer_client.unbounded_send(Message {
                         tags: None,
                         prefix: filter_hostname.hostname(),
@@ -115,24 +128,32 @@ fn main_impl() -> irc::error::Result<()> {
                 }
 
                 // Ordinary filters
-                Command::Raw(ref cmd, _, _) if cmd == "USER" => false,
+                Command::Raw(ref cmd, _, _) if cmd == "USER" => {
+                    trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
+                    false
+                },
                 Command::NICK(_) |
                 Command::USER(_, _, _) |
                 Command::CAP(_, _, _, _) |
-                Command::QUIT(_) => false,
+                Command::QUIT(_) => {
+                    trace!("FILTERED LAST MESSAGE FROM {}", &baddr);
+                    false
+                },
                 _ => true,
             }
         }).for_each(move |message| {
-            print!("[S {}] {}", &saddr, message);
+            info!("TO {}: {}", &saddr, message.to_string().trimmed());
             local_client.send(message)
         });
         let baddr = baddr.clone();
         server_handle.spawn(to_bouncer_client.join(to_real_client).map(|_| ()).map_err(move |e| {
-            eprint!("[E {}] {}", baddr, e);
-            for err in e.causes().skip(1) {
-                eprint!(": {}", err);
+            let report = e.causes().skip(1).fold(format!("FOR {}: {}", baddr, e), |acc, err| {
+                format!("{}: {}", acc, err)
+            });
+            error!("{}", report);
+            if let Some(backtrace) = e.backtrace() {
+                debug!("{}", backtrace);
             }
-            eprintln!();
         }));
         Ok(())
     });
@@ -141,6 +162,22 @@ fn main_impl() -> irc::error::Result<()> {
                 .join(client_splitter_future)
                 .join(split_to_nowhere)
                 .map(|_| ()))
+}
+
+trait StringTrim {
+    fn trimmed(self) -> Self;
+}
+
+impl StringTrim for String {
+    fn trimmed(mut self) -> Self {
+        if self.ends_with('\n') {
+            self.pop();
+        }
+        if self.ends_with('\r') {
+            self.pop();
+        }
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -152,6 +189,7 @@ impl LatestHostname {
     }
 
     pub fn update_hostname(&self, hostname: Option<String>) {
+        debug!("HOST: updating hostname to {:?}", hostname);
         *self.0.lock().expect("unreachable") = hostname
     }
 
@@ -170,6 +208,7 @@ impl ReplayBuffer {
     }
 
     pub fn ready(&self) {
+        debug!("REPLAY SEALED");
         self.1.store(true, Ordering::SeqCst)
     }
 
@@ -178,6 +217,7 @@ impl ReplayBuffer {
     }
 
     pub fn push(&self, message: Message) {
+        debug!("REPLAY PUSHED: {}", message.to_string().trimmed());
         self.0.lock().expect("unreachable").push(message);
     }
 }
@@ -209,6 +249,7 @@ impl Splitter {
     pub fn split(&self) -> UnboundedReceiver<Message> {
         let (send, recv) = mpsc::unbounded();
         for message in self.buffer.clone().into_iter() {
+            trace!("REPLAY: replaying: {}", message.to_string().trimmed());
             send.unbounded_send(message).expect("unreachable");
         }
         self.senders.lock().expect("unreachable").push(send);
@@ -222,12 +263,12 @@ impl Sink for Splitter {
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
         if self.buffer.is_ready() == false {
+            self.buffer.push(item.clone());
             match item.command {
                 Command::Response(Response::RPL_ENDOFMOTD, _, _) |
                 Command::Response(Response::ERR_NOMOTD, _, _) => self.buffer.ready(),
                 _ => ()
             }
-            self.buffer.push(item.clone());
         }
         let mut senders = self.senders.lock().expect("unreachable");
         *senders = senders.clone().into_iter().filter_map(|mut sender| {

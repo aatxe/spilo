@@ -4,8 +4,10 @@ version = "0.1.0"
 authors = ["Aaron Weiss <awe@pdgn.co>"]
 
 [dependencies]
+env_logger = "0.5"
 failure = "0.1"
 futures = "0.1"
+log = "0.4"
 irc = "0.13"
 tokio-core = "0.1"
 tokio-io = "0.1"
