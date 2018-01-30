@@ -83,14 +83,14 @@ fn main_impl() -> irc::error::Result<()> {
         let local_client = client.clone();
         let saddr = local_client.config().socket_addr()?;
 
-        let mut chans = local_client.list_channels().unwrap_or_else(|| Vec::new()).iter().fold(
+        let mut chans = local_client.list_channels().unwrap_or_else(Vec::new).iter().fold(
             String::new(), |mut acc, chan| {
                 acc.push_str(chan);
                 acc.push_str(",");
                 acc
             }
         );
-        if chans.len() > 0 {
+        if !chans.is_empty() {
             let new_size = chans.len() - 1;
             chans.truncate(new_size);
         }
@@ -145,7 +145,6 @@ fn main_impl() -> irc::error::Result<()> {
             debug!("TO {}: {}", &saddr, message.to_string().trimmed());
             local_client.send(message)
         });
-        let baddr = baddr.clone();
         server_handle.spawn(to_bouncer_client.join(to_real_client).map(|_| ()).map_err(move |e| {
             let report = e.causes().skip(1).fold(format!("FOR {}: {}", baddr, e), |acc, err| {
                 format!("{}: {}", acc, err)
@@ -251,7 +250,7 @@ impl Splitter {
 
     pub fn split(&self) -> UnboundedReceiver<Message> {
         let (send, recv) = mpsc::unbounded();
-        for message in self.buffer.clone().into_iter() {
+        for message in self.buffer.clone() {
             trace!("REPLAY: replaying: {}", message.to_string().trimmed());
             send.unbounded_send(message).expect("unreachable");
         }
@@ -265,7 +264,7 @@ impl Sink for Splitter {
     type SinkError = IrcError;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        if self.buffer.is_ready() == false {
+        if !self.buffer.is_ready() {
             self.buffer.push(item.clone());
             match item.command {
                 Command::Response(Response::RPL_ENDOFMOTD, _, _) |
