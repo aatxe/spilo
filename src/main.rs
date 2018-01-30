@@ -37,12 +37,7 @@ fn main() {
 
 fn main_impl() -> irc::error::Result<()> {
     let address = "0.0.0.0:6667".parse().unwrap();
-    let config = Config {
-        nickname: Some("spilo".to_owned()),
-        server: Some("turtur.pdgn.co".to_owned()),
-        use_ssl: Some(true),
-        ..Config::default()
-    };
+    let config = Config::load("config.toml")?;
 
     let mut reactor = Core::new()?;
     let (client_handle, server_handle) = (reactor.handle(), reactor.handle());
